@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tailscale-gluetun-exit-sg # Example for Singapore
+  namespace: tailscale
+spec:
+  # --- Explicit DNS Configuration ---
+  dnsPolicy: ClusterFirst # Explicitly set (usually default)
+  dnsConfig:
+    nameservers:
+      - 10.43.0.10 # Use the Cluster DNS IP from logs
+    searches:
+      # Default Kubernetes search domains - adjust if your cluster is different
+      - tailscale.svc.cluster.local
+      - svc.cluster.local
+      - cluster.local
+    options:
+      - name: ndots
+        value: "5"
+  containers:
+  # 1. Gluetun Sidecar Container (Surfshark Singapore)
+  - name: gluetun
+    image: qmcgaw/gluetun:latest
+    env:
+    - name: VPN_SERVICE_PROVIDER
+      value: "surfshark"
+    - name: OPENVPN_USER
+      valueFrom:
+        secretKeyRef:
+          name: surfshark-credentials # Assumes this secret exists
+          key: OPENVPN_USER
+    - name: OPENVPN_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: surfshark-credentials
+          key: OPENVPN_PASSWORD
+    # --- Location Specific Configuration ---
+    - name: SERVER_COUNTRIES
+      value: "Singapore"
+    # --- Prevent Gluetun from overriding DNS ---
+    - name: DNS_KEEP_NAMESERVER # Keep this as well
+      value: "on"
+    # --- Firewall Configuration ---
+    # Explicitly allow outbound traffic to Cluster DNS and Service CIDR
+    - name: FIREWALL_OUTBOUND_SUBNETS
+      # Combine DNS IP and assumed Service CIDR. Adjust if your Service CIDR is different.
+      value: "10.43.0.10/32,10.43.0.0/16"
+    # Might need to explicitly allow traffic from Tailscale subnet
+    # - name: FIREWALL_INBOUND_SUBNETS
+    #   value: "100.64.0.0/10" # Tailscale CGNAT range
+    securityContext:
+      capabilities:
+        add: ["NET_ADMIN"] # Essential for modifying network routes
+
+  # 2. Tailscale Sidecar Container (Exit Node)
+  - name: tailscale
+    image: tailscale/tailscale:latest
+    env:
+    - name: TS_AUTHKEY
+      valueFrom:
+        secretKeyRef:
+          name: tailscale-auth-sg # Assumes this secret exists
+          key: TS_AUTHKEY
+    - name: TS_HOSTNAME
+      value: "k8s-exit-node-sg" # Name in Tailscale admin console
+    - name: TS_STATE_DIR
+      value: "/var/lib/tailscale"
+    # --- Disable Kubernetes Secret state storage ---
+    - name: TS_KUBE_SECRET
+      value: "" # Add this line
+    # --- CRITICAL: Exit Node & Custom Routing ---
+    - name: TS_EXTRA_ARGS
+      # Keep --accept-dns=false for now
+      value: "--advertise-exit-node --hostname=k8s-exit-node-sg --accept-dns=false"
+      # You would need a custom entrypoint/command script here to:
+      # 1. Wait for both tailscale0 and tun0 (from gluetun) interfaces.
+      # 2. Apply custom `ip rule` and `ip route` commands to policy-route
+      #    traffic arriving on tailscale0 via the tun0 interface.
+      # 3. Set up necessary iptables MASQUERADE/FORWARD rules.
+    securityContext:
+      capabilities:
+        add: ["NET_ADMIN", "NET_RAW"]
+    volumeMounts:
+      - mountPath: /dev/net/tun
+        name: dev-net-tun
+      - mountPath: /var/lib/tailscale
+        name: tailscale-state
+    # command: ["/path/to/your/custom/routing_script.sh"] # You would need to build this script
+
+  volumes:
+    - name: dev-net-tun
+      hostPath:
+        path: /dev/net/tun
+        type: CharDevice
+    - name: tailscale-state
+      emptyDir: {} # Or use a persistentVolumeClaim
