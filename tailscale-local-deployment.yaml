@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tailscale-local-deployment # Deployment name
+  namespace: tailscale # Assuming you want it in the tailscale namespace
+  labels:
+    app: tailscale-local # Label for the deployment itself
+spec:
+  replicas: 1 # Run a single instance
+  selector:
+    matchLabels:
+      app: tailscale-local # Selects pods with this label
+  template:
+    metadata:
+      labels:
+        app: tailscale-local # Label applied to the Pods created by this deployment
+    spec:
+      containers:
+      - name: tailscale
+        image: tailscale/tailscale:latest
+        env:
+        # IMPORTANT: Create a secret named 'tailscale-auth-local' with your Tailscale Auth Key
+        # kubectl create secret generic tailscale-auth-local --from-literal=TS_AUTHKEY=<YOUR_AUTH_KEY> -n tailscale
+        - name: TS_AUTHKEY
+          valueFrom:
+            secretKeyRef:
+              name: tailscale-auth-local # Assumes this secret exists
+              key: TS_AUTHKEY
+        - name: TS_HOSTNAME
+          value: "tailscale-local" # Hostname in Tailscale admin console
+        - name: TS_STATE_DIR
+          value: "/var/lib/tailscale" # Store state within the pod's volume
+        # --- Disable Kubernetes Secret state storage (rely on volume) ---
+        - name: TS_KUBE_SECRET
+          value: ""
+        # --- Configure Subnet Router and Exit Node ---
+        - name: TS_EXTRA_ARGS
+          value: "--advertise-routes=10.40.0.0/14 --advertise-exit-node --hostname=tailscale-local --accept-dns=false"
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN", "NET_RAW"] # Required for routing and raw socket access
+        volumeMounts:
+          - mountPath: /dev/net/tun # Required for TUN device
+            name: dev-net-tun
+          - mountPath: /var/lib/tailscale # Mount for state persistence within the pod lifecycle
+            name: tailscale-state
+      volumes:
+        - name: dev-net-tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        - name: tailscale-state
+          emptyDir: {} # Ephemeral state storage for the pod's lifetime

@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tailscale-gluetun-exit-us-deployment # Deployment name for US
+  namespace: tailscale
+  labels:
+    app: tailscale-gluetun-exit-us # Label for the deployment itself
+spec:
+  replicas: 1 # Run a single instance of this exit node
+  selector:
+    matchLabels:
+      app: tailscale-gluetun-exit-us # Selects pods with this label
+  template:
+    metadata:
+      labels:
+        app: tailscale-gluetun-exit-us # Label applied to the Pods created by this deployment
+    spec:
+      # --- Pod Spec Starts Here (Copied from tailscale-gluetun-us.yaml) ---
+      # --- Explicit DNS Configuration ---
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        nameservers:
+          - 10.43.0.10 # Use the Cluster DNS IP from logs - VERIFY this is still correct
+        searches:
+          - tailscale.svc.cluster.local
+          - svc.cluster.local
+          - cluster.local
+        options:
+          - name: ndots
+            value: "5"
+      containers:
+      # 1. Gluetun Sidecar Container (Surfshark Las Vegas)
+      - name: gluetun
+        image: qmcgaw/gluetun:latest
+        env:
+        - name: VPN_SERVICE_PROVIDER
+          value: "surfshark"
+        - name: OPENVPN_USER
+          valueFrom:
+            secretKeyRef:
+              name: surfshark-credentials # Assumes this secret exists
+              key: OPENVPN_USER
+        - name: OPENVPN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: surfshark-credentials
+              key: OPENVPN_PASSWORD
+        # --- Location Specific Configuration ---
+        # NOTE: Verify if SERVER_CITIES is correct for Surfshark/Las Vegas
+        - name: SERVER_CITIES
+          value: "Las Vegas"
+        # --- Prevent Gluetun from overriding DNS ---
+        - name: DNS_KEEP_NAMESERVER
+          value: "on"
+        # --- Firewall Configuration ---
+        # Explicitly allow outbound traffic to Cluster DNS, Service CIDR, and Private Networks
+        - name: FIREWALL_OUTBOUND_SUBNETS
+          # Combine DNS IP, assumed Service CIDR, and private ranges. VERIFY Service CIDR
+          value: "10.43.0.10/32,10.43.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+        # Might need to explicitly allow traffic from Tailscale subnet
+        # - name: FIREWALL_INBOUND_SUBNETS
+        #   value: "100.64.0.0/10" # Tailscale CGNAT range
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+
+      # 2. Tailscale Sidecar Container (Exit Node)
+      - name: tailscale
+        image: tailscale/tailscale:latest
+        env:
+        - name: TS_AUTHKEY
+          valueFrom:
+            secretKeyRef:
+              # IMPORTANT: Ensure this secret name is correct for US
+              name: tailscale-auth-us
+              key: TS_AUTHKEY
+        - name: TS_HOSTNAME
+          # Ensure this hostname matches the one in TS_EXTRA_ARGS
+          value: "k8s-exit-node-us-lasvegas"
+        - name: TS_STATE_DIR
+          value: "/var/lib/tailscale"
+        # --- Disable Kubernetes Secret state storage ---
+        - name: TS_KUBE_SECRET
+          value: ""
+        # --- CRITICAL: Exit Node & Custom Routing ---
+        - name: TS_EXTRA_ARGS
+          # Ensure hostname here matches TS_HOSTNAME above
+          value: "--advertise-exit-node --hostname=k8s-exit-node-us-lasvegas --accept-dns=false"
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN", "NET_RAW"]
+        volumeMounts:
+          - mountPath: /dev/net/tun
+            name: dev-net-tun
+          - mountPath: /var/lib/tailscale
+            name: tailscale-state
+
+      volumes:
+        - name: dev-net-tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        - name: tailscale-state
+          emptyDir: {}
+      # --- Pod Spec Ends Here ---
